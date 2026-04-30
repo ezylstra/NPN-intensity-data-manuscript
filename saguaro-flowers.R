@@ -1,0 +1,505 @@
+# Analyses of NPN intensity data
+# Floral abundance, saguaros
+
+library(rnpn)
+library(dplyr)
+library(stringr)
+library(lubridate)
+library(tidyr)
+library(ggplot2)
+library(terra)
+library(tidyterra)
+library(brms)
+library(tidybayes)
+library(cowplot)
+
+# Download data via rnpn package, basic formatting (if not done already) ------#
+
+saguaro_data_file <- "npn-data/saguaro-flowers.csv"
+
+if(!file.exists(saguaro_data_file)) {
+  
+  # Get NPN species ID for saguaro
+  saguaro_id <- npn_species() %>%
+    filter(common_name == "saguaro") %>%
+    pull(species_id)
+  
+  # Download most recent 10 years of status-intensity data
+  dl <- npn_download_status_data(
+          request_source = "NAME",
+          years = 2016:2025,
+          species_ids = saguaro_id) %>%
+    data.frame()
+  
+  # Extract data for flowers/flower buds
+  df <- dl %>%
+    filter(phenophase_description == "Flowers or flower buds")
+  
+  # There are some observations where the state field is missing. Will get state
+  # for each site using US state boundaries shapefile from the census bureau.
+  states <- vect("states/cb_2017_us_state_500k.shp")
+  states <- terra::project(states, "epsg:4326") 
+  state_fill <- df %>%
+    distinct(site_id, latitude, longitude, state)
+  state_fillv <- vect(state_fill, 
+                      geom = c("longitude", "latitude"), 
+                      crs = "epsg:4326")
+  state_new <- terra::extract(states, state_fillv)
+  state_fill <- cbind(state_fill, state_new = state_new$STUSPS)
+
+  # Attach new state assignments to the saguaro data and restrict sites to AZ
+  df <- df %>%
+    left_join(select(state_fill, site_id, state_new), by = "site_id") %>%
+    select(-state) %>%
+    rename(state = state_new) %>%
+    filter(!is.na(state), state == "AZ")
+  
+  # Remove unnecessary columns
+  df <- df %>%
+    select(-c(update_datetime, genus, species, kingdom, phenophase_id,
+              intensity_category_id, abundance_value)) 
+  
+  write.csv(df, saguaro_data_file, row.names = FALSE)
+  rm(df, dl, state_fill, state_fillv, state_new, saguaro_id)
+}
+
+# Load saguaro flowering data and simplify ------------------------------------#
+
+df <- read.csv(saguaro_data_file)
+
+# Remove columns we won't need, rename others, and create year column
+df <- df %>%
+  select(-c(observation_id, species_id)) %>%
+  rename(site = site_id,                  # Site ID number
+         lat = latitude,                  # Latitude
+         lon = longitude,                 # Longitude
+         elev = elevation_in_meters,      # Elevation (m)
+         id = individual_id,              # Plant ID number
+         php = phenophase_description,    # Phenophase name
+         obsdate = observation_date,      # Observation date
+         doy = day_of_year,               # Observation day of year
+         status = phenophase_status) %>%  # Phenophase status
+  mutate(yr = year(obsdate))
+
+# Remove observations where phenophase status was unknown (-1)
+# sum(df$status == -1)/nrow(df) * 100 # 0.17% of observations (n = 44)
+df <- filter(df, status != -1)
+
+# Create numeric column with approximate midpoints for each intensity bin 
+# (this is simply for easier sorting and coding)
+df <- df %>%
+  mutate(intensity_midpoint = case_when(
+    intensity_value == "Less than 3" ~ 1,
+    intensity_value == "3 to 10" ~ 5,
+    intensity_value == "11 to 100" ~ 50,
+    intensity_value == "101 to 1,000" ~ 500,
+    intensity_value == "More than 1,000" ~ 1001,
+    .default = NA
+  ))
+  
+# Occasionally there are two observations for a plant in one day with different 
+# intensity or status values. Keeping observation that was in phase with highest
+# intensity value (or observation that doesn't have intensity = NA)
+df <- df %>%
+  arrange(id, obsdate, desc(status), desc(intensity_midpoint)) %>%
+  distinct(id, obsdate, .keep_all = TRUE)
+
+# Make intensity value (intensity_midpoint) = 0 if status = 0
+df <- df %>%
+  mutate(intensity_midpoint = ifelse(status == 0, 0, intensity_midpoint))
+# Now the only NAs left in the intensity_midpoint column occur when the status 
+# is yes but no intensity value was provided 
+
+# Number of saguaros observed at least once between 2016 and 2025
+(n_total <- length(unique(df$id))) # 291
+
+# Filter data -----------------------------------------------------------------#
+
+# Want to exclude any saguaros that weren't observed multiple times during the 
+# typical flowering period (since maximum flower counts could be biased low).
+
+# Specifically, will identify the days of year that bracket the period when 80% 
+# of the flowering observations occurred (flowering period), and the 
+# days of year that bracket the period when 50% of the flowering occurred (peak
+# flowering period). Then, we can exclude plant-year combos when <4 observations 
+# were made during the flowering period and <2 observations were made during 
+# the peak flowering period. 
+
+# Identify when saguaros are typically flowering
+flowering_periods <- df %>%
+  filter(status == 1) %>%
+  summarize(nyrs = n_distinct(yr),
+            nplants = n_distinct(id),
+            nplantyrs = n_distinct(paste(yr, id)),
+            q0.10 = quantile(doy, probs = 0.10),
+            q0.25 = quantile(doy, probs = 0.25),
+            q0.75 = quantile(doy, probs = 0.75),
+            q0.90 = quantile(doy, probs = 0.90),
+            .groups = "drop") %>%
+  mutate(across(q0.10:q0.90, round)) %>%
+  mutate(length_50 = q0.75 - q0.25,
+         length_80 = q0.90 - q0.10) %>%
+  data.frame()
+flowering_periods
+
+q0.10 <- flowering_periods$q0.10[1]
+q0.25 <- flowering_periods$q0.25[1]
+q0.75 <- flowering_periods$q0.75[1]
+q0.90 <- flowering_periods$q0.90[1]
+
+# Summarize amount and quality of information for each plant and year
+pl_yr <- df %>%
+  mutate(in50 = ifelse(doy >= q0.25 & doy <= q0.75, 1, 0)) %>%
+  mutate(in80 = ifelse(doy >= q0.10 & doy <= q0.90, 1, 0)) %>%
+  group_by(id, site, yr) %>%
+  summarize(nobs = n(),
+            first_obs = min(doy),
+            last_obs = max(doy),
+            nobs50 = sum(in50),
+            nobs80 = sum(in80),
+            n_inphase = sum(status),
+            n_intvalue = sum(!is.na(intensity_value)),
+            prop_inphase = round(n_inphase / nobs, 2),
+            prop_intvalue = round(n_intvalue / n_inphase, 2),
+            max_intensity = ifelse(sum(is.na(intensity_midpoint)) == n(),
+                                   NA, max(intensity_midpoint, na.rm = TRUE)),
+            .groups = "drop") %>%
+  data.frame()
+
+# Identify which plant-yr combinations to filter out
+pl_yr <- pl_yr %>%
+  mutate(remove = case_when(
+    is.na(max_intensity) ~ 1,
+    nobs80 < 4 ~ 1,
+    nobs50 < 2 ~ 1,
+    .default = 0
+  ))
+# What proportion of plant-years will be included/excluded and what do the 
+# distribution of max intensity values look like in included/excluded
+# plant-years?
+pl_yr %>% 
+  group_by(remove) %>%
+  summarize(n = n(),
+            nobs_mn = median(nobs),
+            nobs50_md = median(nobs50),
+            nobs80_md = median(nobs80),
+            max0_n = sum(max_intensity == 0 & !is.na(max_intensity)),
+            max10_n = sum(max_intensity %in% c(1, 5) & !is.na(max_intensity)),
+            max50_n = sum(max_intensity == 50 & !is.na(max_intensity)),
+            max500_n = sum(max_intensity >= 500 & !is.na(max_intensity))) %>%
+  data.frame()
+
+# Filter out identified plant-years
+df_filter <- df %>%
+  left_join(select(pl_yr, id, yr, remove), by = c("id", "yr")) %>%
+  filter(remove == 0) %>%
+  select(-remove)
+
+# Number of saguaros with a sufficient number of observations
+(n_filtered <- length(unique(df_filter$id))) # 119
+
+# Aggregate data for each plant-year ------------------------------------------#
+
+flowers <- df_filter %>%
+  group_by(id, site, lat, lon, elev, yr) %>%
+  summarize(n_obs = n(),
+            n_inphase = sum(status),
+            max_count = max(intensity_midpoint, na.rm = TRUE),
+            .groups = "keep") %>%
+  data.frame()
+
+count(flowers, yr) # 11-53 saguaros/yr
+count(flowers, max_count) 
+
+# Create three count categories
+  # midpoint = 0 or 1 or 5 (0-10 flowers = few or none)
+  # midpoint = 50 (11-100 flowers = some)
+  # midpoints = 500 or 1001 (> 100 flowers = many)
+flowers <- flowers %>%
+  mutate(abund3 = case_when(
+    max_count %in% 0:5 ~ "few or none",
+    max_count == 50 ~ "some",
+    max_count >= 500 ~ "many",
+  )) %>%
+  mutate(abund3 = factor(abund3, 
+                         levels = c("few or none", "some", "many"),
+                         ordered = TRUE))
+
+# Created a factored year variable
+flowers$fyr <- factor(flowers$yr)
+
+# Extract information about sites ---------------------------------------------#
+
+sites <- flowers %>%
+  group_by(site, lat, lon, elev) %>%
+  summarize(n_plants = n_distinct(id),
+            n_yrs = n_distinct(yr),
+            n_plantyrs = n_distinct(paste0(id, "_", yr)),
+            .groups = "keep") %>%
+  data.frame()
+
+# Write sites information to file to get PRISM weather data
+# Downloading PRISM data through web interface, so we could get data at 800 m 
+# resolution without having to download daily rasters for CONUS, which takes a
+# long time (https://prism.oregonstate.edu/explorer/bulk.php)
+# write.table(select(sites, lat, lon, site), "weather-data/saguaro-sites.csv", 
+#             sep = ",", row.names = FALSE, col.names = FALSE)
+
+# Process and attach weather data ---------------------------------------------#
+
+# Load daily weather data
+prism_files <- list.files("weather-data/saguaros",
+                          full.names = TRUE,
+                          pattern = "stable|provisional")
+for (i in 1:length(prism_files)) {
+  prism1 <- read.csv(prism_files[i],
+                     header = FALSE,
+                     skip = 11,
+                     col.names = c("site", "lon", "lat", "elev",
+                                   "date", "ppt", "tmin", "tmax"))
+  if (i == 1) {
+    weather <- prism1
+  } else {
+    weather <- rbind(weather, prism1)
+  }
+}
+rm(prism1)
+
+# Summarize by month
+weather <- weather %>%
+  select(-c(lon, lat, elev)) %>%
+  mutate(tmean = (tmin + tmax) / 2,
+         date = ymd(date),
+         yr = year(date),
+         month = month(date)) %>%
+  group_by(site, yr, month) %>%
+  summarize(tmin_mn = mean(tmin),
+            tmax_mn = mean(tmax),
+            tmean_mn = mean(tmean),
+            ppt = sum(ppt),
+            .groups = "keep") %>%
+  filter(site %in% sites$site) %>%
+  data.frame()
+
+# Load 30-year (1991-2020) monthly normals:
+normsfile <- list.files("weather-data/saguaros/", 
+                        full.names = TRUE,
+                        pattern = "30yr")
+norms <- read.csv(normsfile,
+                  header = FALSE,
+                  skip = 11,
+                  col.names = c("site", "lon", "lat", "elev",
+                                "mon", "ppt30", "tmin30", "tmax30")) %>%
+  filter(mon != "Annual") %>%
+  mutate(month = as.integer(factor(mon, levels = month.name))) %>%
+  select(-c(lon, lat, elev, mon)) %>%
+  filter(site %in% sites$site)
+
+# Weather variables:
+  # Min temps in winter (DJF) [mean of daily minimum temperatures]
+  # 9-month precip (summer + fall + winter; Jun-Feb)
+  # Annual mean temperature
+  # Annual precipitation
+weathervars <- weather %>%
+  rename(tmin = tmin_mn,
+         tmax = tmax_mn,
+         tmean = tmean_mn) %>%
+  # Create seasonyr to match up with flowering year
+  mutate(seasonyr = ifelse(month %in% 6:12, yr + 1, yr)) %>%
+  mutate(season = case_when(
+    month %in% 3:5 ~ "sp",
+    month %in% 6:8 ~ "su",
+    month %in% 9:11 ~ "fa",
+    .default = "wi"
+  )) %>%
+  group_by(site, seasonyr) %>%
+  summarize(tmin_wi = mean(tmin[season == "wi"]),
+            ppt_9 = sum(ppt[season != "sp"]),
+            ann_temp = mean(tmean),
+            ann_ppt = sum(ppt),
+            .groups = "keep") %>%
+  filter(seasonyr %in% unique(flowers$yr)) %>%
+  data.frame()
+
+# Calculate 30-year normals
+normvars <- norms %>%
+  mutate(tmean30 = (tmin30 + tmax30) / 2) %>%
+  group_by(site) %>%
+  summarize(tmin_wi_30 = mean(tmin30[month %in% c(12, 1:2)]),
+            ppt_9_30 = sum(ppt30[month %in% c(6:12, 1:2)]),
+            ann_temp_30 = mean(tmean30),
+            ann_ppt_30 = sum(ppt30)) %>%
+  data.frame()
+
+# Merge normals with annual weather and calculate anomalies for temperature, 
+# % of 30-year normals for precipitation.
+weathervars <- weathervars %>%
+  left_join(normvars, by = "site") %>%
+  mutate(tmin_wi_a = tmin_wi - tmin_wi_30,
+         ppt_9_p = (ppt_9 / ppt_9_30) * 100)
+
+# Add climate normals to sites dataframe amd look at patterns with elevation
+sites <- sites %>%
+  left_join(normvars, by = "site")
+ggplot(sites) +
+  geom_point(aes(x = ann_temp_30, y = ann_ppt_30, color = elev),
+             size = 2) +
+  scale_color_viridis_c() +
+  labs(x = "Mean annual temperature (degC)", 
+       y = "Mean annual precipitation (mm)",
+       color = "Elevation (m)") +
+  theme_bw()
+
+# Will remove single site that is 350 m higher elevation than the rest 
+# because climate there is much different (wetter and colder). Site only had
+# 2 years of data for one saguaro.
+sites <- sites %>%
+  filter(elev < 1100)
+flowers <- flowers %>%
+  filter(elev < 1100)
+
+# New number of saguaros in dataset
+(n_saguaros <- length(unique(flowers$id)))
+
+# Add weather data to flowering dataset (and standardize weather, elev data)
+flowers <- flowers %>%
+  left_join(weathervars, by = c("site" = "site", "yr" = "seasonyr")) %>%
+  mutate(tmin_wi_z = (tmin_wi_a - mean(tmin_wi_a)) / sd(tmin_wi_a),
+         ppt_9_z = (ppt_9_p - mean(ppt_9_p)) / sd(ppt_9_p),
+         elev_z = (elev - mean(elev)) / sd(elev))
+
+# Run ordinal model -----------------------------------------------------------#
+
+# Preciptation, winter temperatures, and elevation as fixed effects
+# Using default priors/settings
+  
+m_full <- brm(abund3 ~ ppt_9_z * tmin_wi_z * elev_z + (1|site) + (1|id), 
+              data = flowers, family = cumulative(link = "logit"))
+
+# Assess model fit
+summary(m_full) 
+# Rhat values = 1 and ESS values > 1000
+plot(m_full)
+# Visual inspection of density, trace plots
+  
+# Get posterior samples
+mcmc <- as_draws_df(m_full, variable = "b_|sd_", regex = TRUE)
+
+# Calculate f-statistics
+fs <- mcmc %>%
+  data.frame() %>%
+  select(contains("b_")) %>%
+  select(-contains("b_I"))
+fs <- data.frame(var = colnames(fs),
+                 mn = apply(fs, 2, mean),
+                 f_prelim = apply(fs, 2, function(x) sum(x > 0)/length(x)),
+                 row.names = NULL) %>%
+  mutate(f = ifelse(mn > 0, f_prelim, 1 - f_prelim))
+fs
+
+# Make predictions, create figures --------------------------------------------#
+
+# Won't make predictions for colder than average winters since that only 
+# occurred at a few, middle elevation sites. Will use mean temperature and
+# value 2 SD above normal.
+
+# Select elevations for figure panel (min, mean, max)
+elev_pred <- c(min(flowers$elev), mean(flowers$elev), max(flowers$elev))
+elev_pred_z <- (elev_pred - mean(flowers$elev)) / sd(flowers$elev)
+  
+# Create new dataframe for prediction
+newdat <- expand.grid(
+  elev_z = elev_pred_z,
+  tmin_wi_z = c(0, 2),
+  ppt_9_z = seq(min(flowers$ppt_9_z), max(flowers$ppt_9_z), length = 100),
+  KEEP.OUT.ATTRS = FALSE
+)
+ 
+# Make predictions
+preds <- m_full %>%
+  epred_rvars(newdata = newdat, re_formula = NA, columns_to = "cat") %>%
+  mean_qi(.epred)
+pred_flowers <- preds %>%
+  mutate(ppt_9_p = ppt_9_z * sd(flowers$ppt_9_p) + mean(flowers$ppt_9_p)) %>%
+  mutate(loc = case_when(
+    elev_z == elev_pred_z[1] ~ "Low elevation",
+    elev_z == elev_pred_z[2] ~ "Mean elevation",
+    elev_z == elev_pred_z[3] ~ "High elevation",
+  )) %>%
+  mutate(winter = case_when(
+    tmin_wi_z == 0 ~ "Average winter",
+    tmin_wi_z == 2 ~ "Warm winter"
+  )) %>%
+  mutate(loc = factor(loc, 
+                      levels = c("High elevation", 
+                                 "Mean elevation", 
+                                 "Low elevation"))) %>%
+  mutate(winter = factor(winter, 
+                         levels = c("Average winter", "Warm winter"))) %>%
+  mutate(abund3 = case_when(
+    cat == "few or none" ~ "10 or less",
+    cat == "some" ~ "11 to 100",
+    cat == "many" ~ "More than 100"
+  )) %>%
+  mutate(abund3 = factor(abund3, levels = c("10 or less",
+                                            "11 to 100",
+                                            "More than 100")))
+
+# 6-panel prediction figure
+text_size <- 8
+plot6_flowers <- ggplot(pred_flowers, aes(x = ppt_9_p, y = .epred)) +
+  geom_line(aes(color = abund3), linewidth = 1) +
+  scale_color_manual(values = c("#d8b365", "#80cdc1", "#018571")) +
+  facet_grid(loc ~ winter) +
+  labs(x = "Cumulative 9-month precipitation, % of normal", 
+       y = "Probability", 
+       color = "Flowers") +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.margin   = margin(t = -8),
+        panel.grid = element_blank(),
+        axis.title = element_text(size = text_size),
+        axis.text = element_text(size = text_size),
+        legend.text = element_text(size = text_size),
+        legend.title = element_text(size = text_size), 
+        strip.text = element_text(size = text_size))
+plot6_flowers
+
+# Map
+states <- vect("states/cb_2017_us_state_500k.shp")
+states <- terra::project(states, "epsg:4326") 
+sitesv <- vect(sites, geom = c("lon", "lat"), crs = "epsg:4326")
+text_size <- 8
+map <- ggplot(filter(states, STUSPS == "AZ")) +
+  geom_spatvector(fill = "gray95") +
+  geom_spatvector(data = sitesv,
+                  aes(size = n_plantyrs, color = elev), 
+                  alpha = 0.8) +
+  scale_color_viridis_c(option = "mako") +
+  scale_size_continuous(range = c(0.5, 4)) +
+  scale_x_continuous(breaks = c(-114, -112, -110),
+                     limits = c(-114.8, -109.2),
+                     labels = c("-110°", "-112°", "-114°")) +
+  scale_y_continuous(breaks = c(32, 34, 36),
+                     limits = c(31.4, 36.8),
+                     labels = c("32°", "34°", "36°")) +
+  labs(size = "No. plant-years", 
+       color = "Elev (m)") +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.box = "horizontal",
+        legend.text = element_text(size = text_size),
+        legend.title = element_text(size = text_size),
+        legend.margin = margin(),
+        legend.direction = "vertical",
+        axis.text = element_text(size = text_size))
+map
+
+# Combine map, prediction figures
+combined <- plot_grid(map, plot6_flowers, 
+                      nrow = 1, 
+                      scale = 0.98,
+                      rel_widths = c(4, 5))
+# ggsave("output/map-saguaro-predictions-6panel.png",
+#        combined,
+#        width = 6.5, height = 4.5, units = "in", dpi = 600)
