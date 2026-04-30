@@ -1,0 +1,486 @@
+# Analyses of NPN intensity data
+# Canopy fullness, trees in Great Smokey Mtns National Park (GRSM)
+
+library(rnpn)
+library(dplyr)
+library(stringr)
+library(lubridate)
+library(tidyr)
+library(zoo)
+library(ggplot2)
+library(ordbetareg)
+library(tidybayes)
+library(terra)
+
+# Download data via rnpn package, basic formatting (if not done already) ------#
+
+grsm_data_file <- "npn-data/grsm-leaf-canopy.csv"
+
+if(!file.exists(grsm_data_file)) {
+  
+  # Get NPN species IDs for 6 deciduous tree species
+  tree_ids <- npn_species() %>%
+    filter(common_name %in% c("American basswood",
+                              "American beech",
+                              "northern red oak",
+                              "red maple",
+                              "striped maple",
+                              "sugar maple")) %>%
+    pull(species_id)
+  
+  # Get NPN site IDs for sites in GRSM
+  grsm_sites <- npn_stations() %>%
+    filter(grepl("GRSM", station_name)) %>% 
+    data.frame() %>%
+    filter(latitude < 36) %>%
+    pull(station_id)
+
+  # Download most recent 10 years of status-intensity data
+  dl <- npn_download_status_data(
+    request_source = "NAME",
+    years = 2016:2025,
+    species_ids = tree_ids,
+    station_ids = grsm_sites) %>%
+    data.frame()
+  
+  # Extract data for leaves phenophase
+  df <- dl %>%
+    filter(phenophase_description == "Leaves")
+
+  # Remove unnecessary columns
+  df <- df %>%
+    select(-c(update_datetime, genus, species, kingdom, phenophase_id,
+              intensity_category_id, abundance_value)) 
+  
+  write.csv(df, grsm_data_file, row.names = FALSE)
+  rm(df, dl, states, grsm_sites, tree_ids)
+}
+
+# Load GRSM leaves data and simplify ------------------------------------------#
+
+df <- read.csv(grsm_data_file)
+
+# Remove columns we won't need, rename others, and create year column
+df <- df %>%
+  select(-c(observation_id, species_id)) %>%
+  rename(site = site_id,                  # Site ID number
+         lat = latitude,                  # Latitude
+         lon = longitude,                 # Longitude
+         elev = elevation_in_meters,      # Elevation (m)
+         id = individual_id,              # Plant ID number
+         php = phenophase_description,    # Phenophase name
+         obsdate = observation_date,      # Observation date
+         doy = day_of_year,               # Observation day of year
+         status = phenophase_status) %>%  # Phenophase status
+  mutate(yr = year(obsdate))
+
+# Remove observations where phenophase status was unknown (-1)
+# sum(df$status == -1)/nrow(df) * 100 # 0.12% of observations (n = 60)
+df <- filter(df, status != -1)
+
+# Create numeric column with approximate midpoints for each intensity bin 
+df <- df %>%
+  mutate(intensity_midpoint = case_when(
+    intensity_value == "Less than 5%" ~ 2,
+    intensity_value == "5-24%" ~ 14,
+    intensity_value == "25-49%" ~ 37,
+    intensity_value == "50-74%" ~ 62,
+    intensity_value == "75-94%" ~ 84,
+    intensity_value == "95% or more" ~ 95,
+    .default = NA
+  ))
+
+# Occasionally there are two records for a plant in one day with 
+# different intensity or status values. Keeping record that was in phase with 
+# highest intensity value (or record that doesn't have NAs)
+df <- df %>%
+  arrange(id, obsdate, desc(status), desc(intensity_midpoint)) %>%
+  distinct(id, obsdate, .keep_all = TRUE)
+
+# Make intensity value (intensity midpoint) = 0 if status = 0
+df <- df %>%
+  mutate(intensity_midpoint = ifelse(status == 0, 0, intensity_midpoint))
+# Now the only NAs left in the intensity_midpoint column occur when the status 
+# is yes but no intensity value was provided 
+
+# Number of plants, sites monitored in GRSM since 2016:
+length(unique(df$id)) # 321
+length(unique(df$site)) # 30
+
+# Filter data -----------------------------------------------------------------#
+
+# Will focus on canopy closure in spring, so limiting observations to 
+# the first half of the year (day 182 is June 30/July 1)
+df <- filter(df, doy <= 182)
+
+# Calculate intervals between consecutive observations for each tree, year
+df <- df %>%
+  arrange(common_name, id, yr, doy)
+
+df$interval <- NA
+for (i in 2:nrow(df)) {
+  if (df$id[i] == df$id[i - 1] & df$yr[i] == df$yr[i - 1]) {
+    df$interval[i] <- df$doy[i] - df$doy[i - 1]
+  } else {
+    df$interval[i] <- NA
+  }
+}
+
+# Want to remove plant-year combinations if:
+# no observations in phase
+# no observations with intensity values
+# <5 observations
+# maximum interval between consecutive observations > 21 days
+
+# Summarize amount and quality of information for each plant, year
+pl_yr <- df %>%
+  group_by(site, common_name, id, yr) %>%
+  summarize(nobs = n(),
+            first_obs = min(doy),
+            last_obs = max(doy),
+            mean_int = round(mean(interval, na.rm = TRUE), 2),
+            max_int = ifelse(nobs == 1, NA, max(interval, na.rm = TRUE)),
+            # Get number of observations in phase
+            n_inphase = sum(status),
+            # Get number of observations in phase with an intensity value
+            n_intvalue = sum(!is.na(intensity_value)),
+            # Calculate proportion of observations in phase
+            prop_inphase = round(n_inphase / nobs, 2),
+            # Calculate proportion of in-phase observations with intensity value
+            prop_intvalue = round(n_intvalue / n_inphase, 2),
+            .groups = "drop") %>%
+  data.frame()
+
+pl_yr <- pl_yr %>%
+  mutate(remove = case_when(
+    n_inphase == 0 ~ 1,
+    n_intvalue == 0 ~ 1,
+    nobs < 5 ~ 1,
+    max_int > 21 ~ 1,
+    .default = 0
+  ))
+
+df <- df %>%
+  left_join(select(pl_yr, id, yr, remove), by = c("id", "yr")) %>%
+  filter(remove == 0) %>%
+  select(-remove)  
+
+# Looks like there might be instances where an individual tree had high canopy
+# values with a low value in-between. This isn't really possible, at least in
+# such a short amount of time, so we'll try to filter these data out since 
+# they're likely due to observation error.
+
+# Look for patterns with consecutive intensity values >80, then <50, then
+# back up
+dff <- df %>%
+  mutate(intensity_cat = ifelse(intensity_midpoint > 80, 2,
+                                ifelse(intensity_midpoint < 50, 0, 1))) %>%
+  # Remove observations in phase with no intensity value
+  filter(!is.na(intensity_midpoint)) %>%
+  arrange(id, obsdate)
+
+# Where do high-low-high patterns occur?
+pattern <- c(2, 0, 2)
+starts <- which(zoo::rollapply(dff$intensity_cat, 
+                               length(pattern), 
+                               function(x) all(x == pattern)))
+
+# Identify anomalously low observations so we can filter them out
+dff$anomalous <- 0
+dff$anomalous[starts + 1] <- 1
+# sum(dff$anomalous == 1) / nrow(dff) * 100 # 0.64% of observations
+
+# Filter them out
+dff <- dff %>%
+  filter(anomalous == 0) %>%
+  select(-c(anomalous, intensity_cat))
+
+# Summarize remaining data by species, year
+spp_yr <- dff %>% 
+  group_by(common_name, yr) %>%
+  summarize(n_trees = n_distinct(id),
+            .groups = "keep") %>%
+  data.frame()
+spp_yr
+sum(spp_yr$n_trees >= 5) / nrow(spp_yr)
+# 42/58 species-years (72%) have >= 5 trees. 
+
+# Summarize remaining data by species, across years
+spp_yr %>%
+  group_by(common_name) %>%
+  summarize(n_yrs = n_distinct(yr),
+            n_treeyrs = sum(n_trees),
+            trees_per_yr_min = min(n_trees),
+            trees_per_yr_max = max(n_trees),
+            trees_per_yr_mn = round(mean(n_trees), 2)) %>%
+  data.frame()
+
+# Summarize data by year
+dff %>%
+  group_by(yr) %>%
+  summarize(n_spp = n_distinct(common_name),
+            n_trees = n_distinct(id),
+            n_sites = n_distinct(site)) %>%
+  data.frame()
+
+# Create a dataset that excludes 2020 since only 4 species (20 trees) were 
+# observed that year
+dff_no20 <- filter(dff, yr != 2020)
+
+# Extract and summarize information about sites -------------------------------#
+
+# Summarize data by site
+grsm_sites <- dff %>%
+  group_by(site, lat, lon, elev, state) %>%
+  summarize(n_yrs = n_distinct(yr),
+            yr_2020 = ifelse(2020 %in% yr, 1, 0),
+            n_spp = n_distinct(common_name),
+            n_trees = n_distinct(id),
+            n_bass = n_distinct(id[common_name == "American basswood"]),
+            n_beech = n_distinct(id[common_name == "American beech"]),
+            n_oak = n_distinct(id[common_name == "northern red oak"]),
+            n_red = n_distinct(id[common_name == "red maple"]),
+            n_striped = n_distinct(id[common_name == "striped maple"]),
+            n_sugar = n_distinct(id[common_name == "sugar maple"]),
+            .groups = "keep") %>%
+  data.frame()
+  
+# Write sites information to file to get PRISM weather data
+# Downloading PRISM data through web interface, so we could get data at 800m 
+# resolution without having to download daily rasters for CONUS, which takes a
+# long time (https://prism.oregonstate.edu/explorer/bulk.php)
+# write.table(select(grsm_sites, lat, lon, site), "weather-data/grsm-sites.csv",
+#             sep = ",", row.names = FALSE, col.names = FALSE)
+
+# Process and attach weather data ---------------------------------------------#
+
+# Daily data
+prism_files <- list.files("weather-data/grsm",
+                          full.names = TRUE,
+                          pattern = "stable|provisional")
+for (i in 1:length(prism_files)) {
+  prism1 <- read.csv(prism_files[i],
+                     header = FALSE,
+                     skip = 11,
+                     col.names = c("site", "lon", "lat", "elev",
+                                   "date", "ppt", "tmin", "tmean", "tmax"))
+  if (i == 1) {
+    weather <- prism1
+  } else {
+    weather <- rbind(weather, prism1)
+  }
+}
+rm(prism1)
+
+# Calculate daily GDD values, with base temp of 0 deg C (gdd = tmean - base)
+base <- 0
+weather <- weather %>%
+  mutate(gdd = ifelse(tmean < base, 0, tmean - base)) %>%
+  mutate(yr = year(date),
+         doy = yday(date)) %>%
+  filter(doy <= 200) %>%
+  arrange(site, date)
+
+# Calculate AGDD values
+weather <- weather %>%
+  group_by(site, yr) %>%
+  mutate(agdd = cumsum(gdd)) %>%
+  ungroup() %>%
+  data.frame() %>%
+  rename(obsdate = date)
+
+# Add weather data to leaves dataset (and standardize potential variables)
+dff_no20 <- dff_no20 %>%
+  left_join(select(weather, site, obsdate, agdd), by = c("site", "obsdate")) %>%
+  mutate(agdd_z = (agdd - mean(agdd)) / sd(agdd),
+         doy_z = (doy - mean(doy)) / sd(doy),
+         elev_z = (elev - mean(elev)) / sd(elev))
+
+# Prepare data for models -----------------------------------------------------#
+
+# Calculate canopy proportion (considering 95% as full), and
+# convert some variables to factors
+dff_no20 <- dff_no20 %>%
+  mutate(prop = intensity_midpoint/95,
+         fyr = factor(yr),
+         spp = factor(common_name),
+         id = factor(id))
+
+# Total number of trees
+length(unique(dff_no20$id)) # 304
+
+# Trees each year
+dff_no20 %>%
+  group_by(yr) %>%
+  summarize(n_trees = n_distinct(id)) %>%
+  data.frame()
+
+# Model canopy development as a function of date ------------------------------#
+
+# These models can take hours to run. Leaving code commented out and loading 
+# saved model object below.
+
+# Year and species as random effects
+  # m_no20_doy <- ordbetareg(
+  #   prop ~ doy_z + (1 + doy_z|fyr) + (1 + doy_z|spp) + (1|id),
+  #   data = dff_no20,
+  #   control = list(adapt_delta = 0.99),
+  #   iter = 4000, cores = 4, chains = 4,
+  #   backend = "cmdstanr")
+  # save(m_no20_doy, file = "grsm-models/no20-doy.RData")
+
+# Year and species as random effects with an interaction
+  # m_no20_doy_REint <- ordbetareg(
+  #   prop ~ doy_z + (1 + doy_z|fyr) + (1 + doy_z|spp) + (1 + doy_z|fyr:spp) + (1|id),
+  #   data = dff_no20,
+  #   control = list(adapt_delta = 0.99),
+  #   iter = 4000, cores = 4, chains = 4,
+  #   backend = "cmdstanr")
+  # save(m_no20_doy_REint, file = "grsm-models/no20-doy-REint.RData")
+
+# Model canopy development as a function of GDD -------------------------------#
+
+# Species as a random effect
+  # m_no20_gdd <- ordbetareg(
+  #   prop ~ agdd_z + (1 + agdd_z|spp) + (1|id),
+  #   data = dff_no20, 
+  #   control = list(adapt_delta = 0.99),
+  #   iter = 4000, cores = 4, chains = 4,
+  #   backend = "cmdstanr")
+  # save(m_no20_gdd, file = "grsm-models/no20-gdd.RData")
+
+# Compare models, results -----------------------------------------------------#
+
+load("grsm-models/no20-doy.RData")
+load("grsm-models/no20-doy-REint.RData")
+load("grsm-models/no20-gdd.RData")
+
+# Compare day of year models
+summary(m_no20_doy)
+summary(m_no20_doy_REint)
+
+# Compare models
+# (lower looic is better; elpd_diff = 0 for best model)
+loo_doy <- loo(m_no20_doy, cores = 4)
+loo_doy # looic = 12224.1
+loo_doy_int <- loo(m_no20_doy_REint, cores = 4)
+loo_doy_int # looic = 11643.4
+loo_compare(loo_doy, loo_doy_int)
+# For DOY models, more complex RE structure is better (species effect varies by 
+# year; elpd_diff for non-interaction model = -290.3). 
+
+# Visualize results for best DOY model ----------------------------------------#
+
+# Predictions for species across years (ignore year, year:spp, and ind REs)
+newdat <- expand_grid(doy_z = seq(min(dff_no20$doy_z), 
+                                  max(dff_no20$doy_z), 
+                                  length = 100),
+                      spp = levels(dff_no20$spp))
+
+doy_mn_spp <- m_no20_doy_REint %>%
+  epred_rvars(newdata = newdat, re_formula = ~ (1 + doy_z | spp)) %>%
+  mean_qi(.epred) %>%
+  mutate(doy = doy_z * sd(dff_no20$doy) + mean(dff_no20$doy))
+
+# Colorblind palette: 
+color <- c("#DF536B", "#F5C710", "gray62","#61D04F", "#2297E6", "#28E2E5")
+
+# Create figure
+plot_doy_mn_spp <- ggplot(filter(doy_mn_spp, doy > 80 & doy < 160), 
+                          aes(x = doy, y = .epred)) +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper, fill = spp), alpha = 0.1) +
+  geom_line(aes(color = spp), linewidth = 0.8) +
+  geom_hline(yintercept = 0.5, color = "gray30", linetype = "dotted") +
+  scale_color_manual(values = color) +
+  scale_fill_manual(values = color) +
+  scale_y_continuous(breaks = seq(0, 1, by = 0.25), 
+                     labels = seq(0, 100, by = 25)) +
+  labs(x = "Day of year", 
+       y = "Predicted canopy fullness (%)") +
+  theme_bw() +
+  theme(legend.position = "inside",
+        legend.position.inside = c(0.15, 0.75),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 8),
+        legend.key.height = unit(13, "pt"),
+        legend.margin = margin(0, 0, 0, 0))
+plot_doy_mn_spp
+# ggsave("output/grsm-canopy-doy.png",
+#        plot_doy_mn_spp,
+#        width = 6.5, height = 3, units = "in", dpi = 600)
+
+# Predictions for species each year (ignore ind REs)
+newdat_yr <- expand_grid(doy_z = seq(min(dff_no20$doy_z), 
+                                  max(dff_no20$doy_z), 
+                                  length = 100),
+                         spp = levels(dff_no20$spp),
+                         fyr = levels(dff_no20$fyr))
+
+doy_yr_spp <- m_no20_doy_REint %>%
+  epred_rvars(newdata = newdat_yr, 
+              re_formula = ~ (1 + doy_z|fyr) + (1 + doy_z|spp) + (1 + doy_z|fyr:spp)) %>%
+  mean_qi(.epred) %>%
+  mutate(doy = doy_z * sd(dff_no20$doy) + mean(dff_no20$doy))
+
+# Create 3x3 panel figure
+plot_doy_yr_spp <- ggplot(filter(doy_yr_spp, doy > 80 & doy < 160), 
+                          aes(x = doy, y = .epred)) +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper, fill = spp), alpha = 0.1) +
+  geom_line(aes(color = spp), linewidth = 0.8) +
+  geom_hline(yintercept = 0.5, color = "gray30", linetype = "dotted") +
+  facet_wrap(~fyr) +
+  scale_color_manual(values = color) +
+  scale_fill_manual(values = color) +
+  scale_y_continuous(breaks = seq(0, 1, by = 0.25), 
+                     labels = seq(0, 100, by = 25)) +
+  labs(x = "Day of year", 
+       y = "Predicted canopy fullness (%)") +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank(),
+        legend.text = element_text(size = 9))
+plot_doy_yr_spp
+# ggsave("output/grsm-canopy-doy-yr-3x3.png",
+#        plot_doy_yr_spp,
+#        width = 6.5, height = 6.5, units = "in", dpi = 600)
+
+# Visualize results for GDD model ---------------------------------------------#
+
+# Predictions for species across years (ignore year, year:spp, and ind REs)
+newdat <- expand_grid(agdd_z = seq(min(dff_no20$agdd_z), 
+                                   max(dff_no20$agdd_z), 
+                                   length = 100),
+                      spp = levels(dff_no20$spp))
+
+gdd_spp <- m_no20_gdd %>%
+  epred_rvars(newdata = newdat, re_formula = ~ (1 + agdd_z | spp)) %>%
+  mean_qi(.epred) %>%
+  mutate(agdd = agdd_z * sd(dff_no20$agdd) + mean(dff_no20$agdd))
+
+# Colorblind palette from here: 
+color <- c("#DF536B", "#F5C710", "gray62","#61D04F", "#2297E6", "#28E2E5")
+
+xlab <- "Accumulated growing degree days (°C)"
+
+plot_gdd_spp <- ggplot(filter(gdd_spp, agdd > 400 & agdd < 1600), 
+                       aes(x = agdd, y = .epred)) +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper, fill = spp), alpha = 0.1) +
+  geom_line(aes(color = spp), linewidth = 0.8) +
+  geom_hline(yintercept = 0.5, color = "gray30", linetype = "dotted") +
+  scale_color_manual(values = color) +
+  scale_fill_manual(values = color) +
+  scale_y_continuous(breaks = seq(0, 1, by = 0.25), 
+                     labels = seq(0, 100, by = 25)) +
+  labs(x = xlab, 
+       y = "Predicted canopy fullness (%)") +
+  theme_bw() +
+  theme(legend.position = "inside",
+        legend.position.inside = c(0.15, 0.75),
+        legend.title = element_blank(),
+        legend.text = element_text(size = 8),
+        legend.key.height = unit(13, "pt"),
+        legend.margin = margin(0, 0, 0, 0))
+plot_gdd_spp
+# ggsave("output/grsm-canopy-gdd.png",
+#        plot_gdd_spp,
+#        width = 6.5, height = 3, units = "in", dpi = 600)
