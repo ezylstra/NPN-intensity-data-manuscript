@@ -12,6 +12,7 @@ library(tidyterra)
 library(brms)
 library(tidybayes)
 library(cowplot)
+library(rnaturalearth)
 
 # Download data via rnpn package, basic formatting (if not done already) ------#
 
@@ -469,19 +470,49 @@ plot6_flowers
 states <- vect("states/cb_2017_us_state_500k.shp")
 states <- terra::project(states, "epsg:4326") 
 sitesv <- vect(sites, geom = c("lon", "lat"), crs = "epsg:4326")
-text_size <- 8
-map <- ggplot(filter(states, STUSPS == "AZ")) +
-  geom_spatvector(fill = "gray95") +
+
+countries <- rnaturalearth::ne_countries()
+countries <- vect(countries)
+countries <- terra::subset(countries, 
+                           countries$admin %in% c("United States of America",
+                                                  "Mexico",
+                                                  "Canada"))
+
+# GIS layer with approximate Sonoran Desert boundary 
+# (from https://giscarta.com/atlas/sonoran-desert)
+sonoran_desert <- vect("sonoran-desert/sonoran_desert.shp")
+sonoran_desert <- terra::project(sonoran_desert, "epsg:4326")
+
+inset <- ggplot(data = countries) +
+  geom_spatvector(fill = "white") +
+  lims(x = c(-125, -69), y = c(17, 50)) +
+  annotate("rect", ymin = 31.4, ymax = 37.5, xmin = -115, xmax = -108.5,
+           fill = "transparent", color = "black") + 
+  theme_bw() +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.background = element_rect(fill = "gray98"),
+        panel.grid = element_blank())
+
+map <- ggplot(data = sonoran_desert) +
+  geom_spatvector(fill = "gray95") + 
+  geom_spatvector(data = filter(states, STUSPS %in% c("AZ", "CA", "NM", 
+                                                      "UT", "NV", "CO")),
+                  fill = "transparent") +
   geom_spatvector(data = sitesv,
                   aes(size = n_plantyrs, color = elev), 
                   alpha = 0.8) +
+  annotate("text", x = -111.7, y = 35, label = "AZ", size = 3) +
+  annotate("text", x = -114.9, y = 34, label = "CA", size = 3) +
+  annotate("text", x = -114.7, y = 36.7, label = "NV", size = 3) +
+  annotate("text", x = -113.2, y = 37.3, label = "UT", size = 3) +
   scale_color_viridis_c(option = "mako") +
   scale_size_continuous(range = c(0.5, 4)) +
   scale_x_continuous(breaks = c(-114, -112, -110),
-                     limits = c(-114.8, -109.2),
-                     labels = c("-110°", "-112°", "-114°")) +
+                     limits = c(-115, -108.5),
+                     labels = c("-114°", "-112°", "-110°")) +
   scale_y_continuous(breaks = c(32, 34, 36),
-                     limits = c(31.4, 36.8),
+                     limits = c(31.4, 37.5),
                      labels = c("32°", "34°", "36°")) +
   labs(size = "No. plant-years", 
        color = "Elev (m)") +
@@ -492,14 +523,20 @@ map <- ggplot(filter(states, STUSPS == "AZ")) +
         legend.title = element_text(size = text_size),
         legend.margin = margin(),
         legend.direction = "vertical",
-        axis.text = element_text(size = text_size))
-map
+        axis.text = element_text(size = text_size),
+        panel.grid = element_blank())
+
+gg_inset_map2 <- ggdraw() +
+  draw_plot(map) +
+  draw_plot(inset, x = 0.53, y = 0.77, width = 0.4, height = 0.23)
 
 # Combine map, prediction figures
-combined <- plot_grid(map, plot6_flowers, 
+combined <- plot_grid(gg_inset_map2, plot6_flowers, 
+                      labels = c("a)", "b)"),
+                      label_size = 12,
                       nrow = 1, 
                       scale = 0.98,
                       rel_widths = c(4, 5))
-# ggsave("output/map-saguaro-predictions-6panel.png",
-#        combined,
-#        width = 6.5, height = 4.5, units = "in", dpi = 600)
+ggsave("output/map-saguaro-predictions-6panel.png",
+       combined,
+       width = 6.5, height = 4.5, units = "in", dpi = 600)
