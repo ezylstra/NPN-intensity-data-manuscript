@@ -53,7 +53,7 @@ if(!file.exists(grsm_data_file)) {
               intensity_category_id, abundance_value)) 
   
   write.csv(df, grsm_data_file, row.names = FALSE)
-  rm(df, dl, states, grsm_sites, tree_ids)
+  rm(df, dl, grsm_sites, tree_ids)
 }
 
 # Load GRSM leaves data and simplify ------------------------------------------#

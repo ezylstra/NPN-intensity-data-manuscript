@@ -506,7 +506,8 @@ map <- ggplot(data = sonoran_desert) +
   annotate("text", x = -114.9, y = 34, label = "CA", size = 3) +
   annotate("text", x = -114.7, y = 36.7, label = "NV", size = 3) +
   annotate("text", x = -113.2, y = 37.3, label = "UT", size = 3) +
-  scale_color_viridis_c(option = "mako") +
+  # scale_color_viridis_c(option = "mako") +
+  scale_color_viridis_c(option = "viridis") +
   scale_size_continuous(range = c(0.5, 4)) +
   scale_x_continuous(breaks = c(-114, -112, -110),
                      limits = c(-115, -108.5),
