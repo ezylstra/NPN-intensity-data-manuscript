@@ -6,10 +6,13 @@ library(dplyr)
 library(stringr)
 library(lubridate)
 library(tidyr)
-library(lme4)
+library(brms)
+library(posterior)
+library(tidybayes)
 library(ggplot2)
 library(terra)
 library(tidyterra)
+library(cowplot)
 
 # Download data via rnpn package, basic formatting (if not done already) ------#
 
@@ -174,12 +177,17 @@ flowers <- flowers %>%
 
 # Look at totals
 count(flowers, status_flowers, status_open, intensity_flowers, intensity_open)
-# Now, all  status_flowers = 0 or 1 (no NAs)
-# There are 204 observations with status_flowers = 1 and status_open = NA
+# Now, all status_flowers = 0 or 1 (no NAs)
+# There are 198 observations with status_flowers = 1 and status_open = NA
 # All intensity values = 0 when status = 0
 # NA intensity values only present when status = 1 and the other intensity value is present
 
-# Occasionally (n = 22), there were multiple observations of the same plant on 
+# Multiple observations of the same plant on the same day?
+flowers %>% 
+  group_by(id, obsdate) %>%
+  summarize(n = n(), .groups = "drop") %>%
+  count(n)
+# Occasionally (n = 23), there were multiple observations of the same plant on 
 # the same day. If at least one observation provided an intensity value for 
 # flowers and the other provided an intensity value for open flowers, we can 
 # combine them.
@@ -291,7 +299,7 @@ of_plantyrs <- flowers %>%
   mutate(remove = ifelse(min_counts + earliest_obs + startend0 == 3, 0, 1))
 
 count(of_plantyrs, remove)
-# With these filters, left with 528 plant-years (30.8% of 1717 plant years)
+# With these filters, left with 530 plant-years (30.8% of 1719 plant years)
 
 # Filter
 of <- flowers %>%
@@ -320,7 +328,7 @@ ofsites <- of %>%
 # Load daily data
 prism_files <- list.files("weather-data/redbuds",
                           full.names = TRUE,
-                          pattern = "stable|provisional")
+                          pattern = "stable")
 for (i in 1:length(prism_files)) {
   prism1 <- read.csv(prism_files[i],
                      header = FALSE,
@@ -405,6 +413,8 @@ winter_tmin <- winter_tmin %>%
   mutate(winter_tmin_anom = winter_tmin - winter_tmin30)
 
 # Calculate AGDD for DOY 1-90 and calculate anomalies
+# (Using anomalies, because otherwise AGDD values are strongly, negatively 
+# correlated with latitude)
 agdd <- weather %>%
   select(site, date, tmean) %>%
   mutate(date = ymd(date),
@@ -433,7 +443,8 @@ weather_vars <- winter_ppt %>%
   select(site, season, winter_ppt_perc) %>%
   left_join(select(winter_tmin, site, season, winter_tmin_anom),
             by = c("site", "season")) %>%
-  left_join(select(agdd, site, season, agdd_anom), by = c("site" ,"season"))
+  left_join(select(agdd, site, season, agdd_anom), 
+            by = c("site" ,"season"))
 
 # Create dataset to evaluate annual/spatial variation in max counts -----------# 
 
@@ -467,35 +478,90 @@ ofmax %>%
 length(unique(ofmax$site)) # 179 sites
 length(unique(ofmax$id))   # 277 trees
 
+# Create a couple simple functions for calculating f-statistics ---------------#
+
+prob_gt0 <- function(x) mean(x > 0)
+prob_lt0 <- function(x) mean(x < 0)
+
 # Model annual/spatial variation in max counts --------------------------------# 
 
 # Will want to log maximum counts since they vary over orders of magnitude
 ofmax <- ofmax %>%
   mutate(maxcount_log = log(maxcount))
 
-# Will use ML to compare models with different fixed effects, then run model
-# using REML for inferences.
+# Full additive model
+m_full <- brm(maxcount_log ~ lat_z + lon_z + elev_z + 
+                winter_ppt_z + winter_tmin_z + agdd_z + (1|fyr) + (1|site),
+              data = ofmax,
+              seed = 1234)
+summary(m_full) 
 
-# Full model (with random year, site effects)
-m_full <- lmer(maxcount_log ~ lat_z + lon_z + elev_z + 
-                 winter_ppt_z + winter_tmin_z + agdd_z + (1|fyr) + (1|site),
-               data = ofmax, REML = FALSE)
-summary(m_full)
-confint(m_full, level = 0.80) 
+# Calculate f-statistics
+mcmc_full <- as_draws_df(m_full, variable = "b_", regex = TRUE)
+fs_full <- mcmc_full %>%
+  summarize_draws(mean, 
+                  ~quantile2(.x, probs = 0.025),
+                  ~quantile2(.x, probs = 0.975),
+                  "ProbPos" = prob_gt0,
+                  "ProbNeg" = prob_lt0) %>%
+  mutate(f = pmax(ProbPos, ProbNeg)) %>%
+  data.frame() %>%
+  select(-contains("Prob"))
+fs_full 
 
-# Remove variables that have little to no explanatory power (80% CI includes 0):
-m_winter <- lmer(maxcount_log ~ lat_z +
-                   winter_ppt_z + winter_tmin_z + (1|fyr) + (1|site),
-                 data = ofmax, REML = FALSE)
-summary(m_winter)
-AIC(m_full, m_winter)
+# Reduced model (keep variables with f > 0.9), add all 2-way interactions
+m_int <- brm(maxcount_log ~ lat_z + winter_ppt_z + winter_tmin_z + 
+               lat_z:winter_ppt_z + lat_z:winter_tmin_z + 
+               winter_ppt_z:winter_tmin_z + (1|fyr) + (1|site),
+             data = ofmax,
+             seed = 1234)
 
-# Refit reduced model with REML = TRUE
-m_winter <- lmer(maxcount_log ~ lat_z +
-                   winter_ppt_z + winter_tmin_z + (1|fyr) + (1|site),
-                 data = ofmax, REML = TRUE)
-summary(m_winter)
-confint(m_winter, level = 0.95)
+# Calculate f-statistics
+mcmc_int <- as_draws_df(m_int, variable = "b_", regex = TRUE)
+fs_int <- mcmc_int %>%
+  summarize_draws(mean, 
+                  ~quantile2(.x, probs = 0.025),
+                  ~quantile2(.x, probs = 0.975),
+                  "ProbPos" = prob_gt0,
+                  "ProbNeg" = prob_lt0) %>%
+  mutate(f = pmax(ProbPos, ProbNeg)) %>%
+  data.frame() %>%
+  select(-contains("Prob"))
+fs_int
+# Latitude*winter precip is the only interaction with f > 0.9
+
+# Final model
+m_int <- brm(maxcount_log ~ lat_z + winter_ppt_z + winter_tmin_z + 
+               lat_z:winter_ppt_z + (1|fyr) + (1|site),
+             data = ofmax,
+             seed = 1234)
+
+# Evaluate model fit
+summary(m_int)
+plot(m_int)
+# Rhat values <= 1.01 and ESS values > 1000
+# Visual inspection of density, trace plots, which look good
+
+# Create summary table
+mcmc_int <- as_draws_df(m_int, 
+                        variable = "b_|sd_|sigma", 
+                        regex = TRUE)
+table_maxc <- mcmc_int %>%
+  summarize_draws(mean, 
+                  ~quantile2(.x, probs = 0.025),
+                  ~quantile2(.x, probs = 0.975),
+                  rhat, 
+                  ess_bulk,
+                  "ProbPos" = prob_gt0,
+                  "ProbNeg" = prob_lt0) %>%
+  mutate(f = pmax(ProbPos, ProbNeg)) %>%
+  data.frame() %>%
+  select(-contains("Prob"))
+
+# Write to file
+# write.csv(table_maxc,
+#           "output/redbud-maxcounts-table.csv",
+#           row.names = FALSE)
 
 # Create dataset to evaluate variation in peak flower timing ------------------# 
 
@@ -564,7 +630,7 @@ ofpeak <- of_plantyr %>%
          peak = floor((first_max + last_max)/2),
          fyr = factor(yr),
          yr0 = yr - min(yr))
-# There are a total of 509 plant-year combinations in the filtered dataset
+# There are a total of 511 plant-year combinations in the filtered dataset
 
 # Attach weather variables
 ofpeak <- ofpeak %>%
@@ -588,29 +654,166 @@ ofpeak %>%
 # winter minimum temperatures
 
 # Number of sites, trees
-length(unique(ofpeak$site))
-length(unique(ofpeak$id))
+length(unique(ofpeak$site)) # 175
+length(unique(ofpeak$id)) # 271
 
 # Model variation in peak flower timing ---------------------------------------# 
 
-# Full model (with random year, site effects)
-mpeak_full <- lmer(peak ~ lat_z + lon_z + elev_z + yr0 +
-                     winter_ppt_z + winter_tmin_z + agdd_z + (1|fyr) + (1|site),
-                   data = ofpeak, REML = FALSE)
+# Full additive model (with random year, site effects)
+mpeak_full <- brm(peak ~ lat_z + lon_z + elev_z + yr0 +
+                    winter_ppt_z + winter_tmin_z + agdd_z + (1|fyr) + (1|site),
+                  data = ofpeak,
+                  seed = 1234)
 summary(mpeak_full)
-confint(mpeak_full, level = 0.80) 
 
-# Remove variables that have little to no explanatory power (80% CI includes 0):
-mpeak_agdd <- lmer(peak ~ lat_z + elev_z + agdd_z + (1|fyr) + (1|site),
-                   data = ofpeak, REML = FALSE)
-summary(mpeak_agdd)
-AIC(mpeak_full, mpeak_agdd)
+# Calculate f-statistics for f-statistics
+mcmc_peak_full <- as_draws_df(mpeak_full, variable = "b_", regex = TRUE)
+fs_peak_full <- mcmc_peak_full %>%
+  summarize_draws(mean, 
+                  ~quantile2(.x, probs = 0.025),
+                  ~quantile2(.x, probs = 0.975),
+                  "ProbPos" = prob_gt0,
+                  "ProbNeg" = prob_lt0) %>%
+  mutate(f = pmax(ProbPos, ProbNeg)) %>%
+  data.frame() %>%
+  select(-contains("Prob"))
+fs_peak_full
 
-# Refit reduced model with REML = TRUE
-mpeak_agdd <- lmer(peak ~ lat_z + elev_z + agdd_z + (1|fyr) + (1|site),
-                   data = ofpeak, REML = TRUE)
-summary(mpeak_agdd)
-confint(mpeak_agdd, level = 0.95)
+# Reduced model (remove variables with f < 0.9), with all 2-way interactions
+mpeak_int <- brm(peak ~ lat_z * elev_z * agdd_z + (1|fyr) + (1|site),
+                 data = ofpeak,
+                 seed = 1234)
+
+# Evaluate model fit
+summary(mpeak_int)
+plot(mpeak_int)
+# Rhat values <= 1.01 and ESS values > 1000
+# Visual inspection of density, trace plots, which look good
+
+# Create summary table
+mcmc_peak_int <- as_draws_df(mpeak_int, 
+                             variable = "b_|sd_|sigma", 
+                             regex = TRUE)
+table_peak <- mcmc_peak_int %>%
+  summarize_draws(mean, 
+                  ~quantile2(.x, probs = 0.025),
+                  ~quantile2(.x, probs = 0.975),
+                  rhat, 
+                  ess_bulk,
+                  "ProbPos" = prob_gt0,
+                  "ProbNeg" = prob_lt0) %>%
+  mutate(f = pmax(ProbPos, ProbNeg)) %>%
+  data.frame() %>%
+  select(-contains("Prob"))
+# All 2-way interactions seem to be important
+
+# Write to file
+# write.csv(table_peak,
+#           "output/redbud-peakdoy-table.csv",
+#           row.names = FALSE)
+
+# Create marginal effect plot for max open flower count -----------------------#
+
+# TODO: Determine best color palette (keeping in mind color palettes used in
+# other figures)
+
+# Max count at different winter precip levels and latitudes, for mean winter temp (0)
+lat_pred <- c(min(ofmax$lat), mean(ofmax$lat), max(ofmax$lat))
+lat_pred_z <- (lat_pred - mean(ofmax$lat)) / sd(ofmax$lat)
+
+# Create new dataframe for prediction
+newdat <- expand.grid(
+  winter_tmin_z = 0,
+  lat_z = lat_pred_z,
+  winter_ppt_z = seq(min(ofmax$winter_ppt_z), max(ofmax$winter_ppt_z), 
+                     length = 100),
+  KEEP.OUT.ATTRS = FALSE
+)
+# Make predictions
+preds_maxc <- m_int %>%
+  epred_rvars(newdata = newdat, re_formula = NA) %>%
+  mean_qi(.epred)
+pred_maxc <- preds_maxc %>%
+  mutate(winter_ppt_p = winter_ppt_z * sd(ofmax$winter_ppt_perc) + mean(ofpeak$winter_ppt_perc)) %>%
+  mutate(loc = case_when(
+    lat_z == lat_pred_z[1] ~ paste0(sprintf("%.1f", round(lat_pred[1], 1)), "°"),
+    lat_z == lat_pred_z[2] ~ paste0(sprintf("%.1f", round(lat_pred[2], 1)), "°"),
+    lat_z == lat_pred_z[3] ~ paste0(sprintf("%.1f", round(lat_pred[3], 1)), "°"))) %>%
+  mutate(loc = factor(loc))
+
+text_size <- 8
+plot_maxc <- ggplot(pred_maxc, aes(x = winter_ppt_p, y = .epred)) +
+  geom_line(aes(color = loc, linetype = loc), linewidth = 0.5) +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper, fill = loc), alpha = 0.3) +
+  scale_color_manual(values = c("#d8b365", "#80cdc1", "#018571")) +
+  scale_fill_manual(values = c("#d8b365", "#80cdc1", "#018571")) +
+  labs(x = "Winter precipitation, % of normal", 
+       y = "Log(No. open flowers)", 
+       color = "Latitude", fill = "Latitude", linetype = "Latitude") +
+  theme_bw() +
+  theme(legend.position = "inside",
+        legend.position.inside = c(0.85, 0.22),
+        panel.grid = element_blank(),
+        axis.title = element_text(size = text_size),
+        axis.text = element_text(size = text_size),
+        legend.text = element_text(size = text_size - 1),
+        legend.title = element_text(size = text_size - 1, 
+                                    margin = margin(b = 2)),
+        legend.key.size = unit(0.4, "cm"),
+        legend.spacing.y = unit(0.1, "cm"),
+        legend.margin = margin(0, 0, 0, 0))
+plot_maxc
+
+# Create marginal effect plot for peak DOY ------------------------------------#
+
+# Peak DOY at different GDD levels and latitudes, for mean elevation (0)
+
+# Create new dataframe for prediction
+newdat <- expand.grid(
+  elev_z = 0,
+  lat_z = lat_pred_z,
+  agdd_z = seq(min(ofpeak$agdd_z), max(ofpeak$agdd_z), length = 100),
+  KEEP.OUT.ATTRS = FALSE
+)
+# Make predictions
+preds_doy <- mpeak_int %>%
+  epred_rvars(newdata = newdat, re_formula = NA, columns_to = "doy") %>%
+  mean_qi(.epred)
+pred_doy <- preds_doy %>%
+  mutate(agdd_p = agdd_z * sd(ofpeak$agdd_anom) + mean(ofpeak$agdd_anom)) %>%
+  mutate(loc = case_when(
+    lat_z == lat_pred_z[1] ~ paste(sprintf("%.1f", round(lat_pred[1], 1)), "°"),
+    lat_z == lat_pred_z[2] ~ paste(sprintf("%.1f", round(lat_pred[2], 1)), "°"),
+    lat_z == lat_pred_z[3] ~ paste(sprintf("%.1f", round(lat_pred[3], 1)), "°"))) %>%
+  mutate(loc = factor(loc))
+
+text_size <- 8
+plot_doy <- ggplot(pred_doy, aes(x = agdd_p, y = .epred)) +
+  geom_line(aes(color = loc, linetype = loc), linewidth = 0.5) +
+  geom_ribbon(aes(ymin = .lower, ymax = .upper, fill = loc), alpha = 0.3) +
+  scale_color_manual(values = c("#d8b365", "#80cdc1", "#018571")) +
+  scale_fill_manual(values = c("#d8b365", "#80cdc1", "#018571")) +
+  labs(x = "90-day GDD, difference from normal (°C)", 
+       y = "Day of year") +
+  theme_bw() +
+  theme(legend.position = "none",
+        panel.grid = element_blank(),
+        axis.title = element_text(size = text_size),
+        axis.text = element_text(size = text_size))
+plot_doy
+
+# Combine plots ---------------------------------------------------------------#
+
+# Combine map, prediction figures
+combined <- plot_grid(plot_maxc, plot_doy, 
+                      labels = c("a)", "b)"),
+                      label_size = 11,
+                      nrow = 1, 
+                      scale = 0.98,
+                      rel_widths = c(1, 1))
+# ggsave("output/redbud-predictions.png",
+#        combined,
+#        width = 6.5, height = 2.5, units = "in", dpi = 600)
 
 # Create a map ----------------------------------------------------------------#
 
