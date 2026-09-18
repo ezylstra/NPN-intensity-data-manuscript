@@ -10,6 +10,7 @@ library(ggplot2)
 library(terra)
 library(tidyterra)
 library(brms)
+library(posterior)
 library(tidybayes)
 library(cowplot)
 library(rnaturalearth)
@@ -83,7 +84,7 @@ df <- df %>%
   mutate(yr = year(obsdate))
 
 # Remove observations where phenophase status was unknown (-1)
-# sum(df$status == -1)/nrow(df) * 100 # 0.17% of observations (n = 44)
+# sum(df$status == -1)/nrow(df) * 100 # 0.16% of observations (n = 44)
 df <- filter(df, status != -1)
 
 # Create numeric column with approximate midpoints for each intensity bin 
@@ -112,7 +113,7 @@ df <- df %>%
 # is yes but no intensity value was provided 
 
 # Number of saguaros observed at least once between 2016 and 2025
-(n_total <- length(unique(df$id))) # 291
+(n_total <- length(unique(df$id))) # 287
 
 # Filter data -----------------------------------------------------------------#
 
@@ -251,7 +252,7 @@ sites <- flowers %>%
 # Load daily weather data
 prism_files <- list.files("weather-data/saguaros",
                           full.names = TRUE,
-                          pattern = "stable|provisional")
+                          pattern = "stable")
 for (i in 1:length(prism_files)) {
   prism1 <- read.csv(prism_files[i],
                      header = FALSE,
@@ -369,6 +370,11 @@ flowers <- flowers %>%
          ppt_9_z = (ppt_9_p - mean(ppt_9_p)) / sd(ppt_9_p),
          elev_z = (elev - mean(elev)) / sd(elev))
 
+# Create a couple simple functions for calculating f-statistics ---------------#
+
+prob_gt0 <- function(x) mean(x > 0)
+prob_lt0 <- function(x) mean(x < 0)
+
 # Run ordinal model -----------------------------------------------------------#
 
 # Preciptation, winter temperatures, and elevation as fixed effects
@@ -379,24 +385,28 @@ m_full <- brm(abund3 ~ ppt_9_z * tmin_wi_z * elev_z + (1|site) + (1|id),
 
 # Assess model fit
 summary(m_full) 
-# Rhat values = 1 and ESS values > 1000
 plot(m_full)
+# Rhat values = 1 and ESS values > 1000
 # Visual inspection of density, trace plots
-  
-# Get posterior samples
-mcmc <- as_draws_df(m_full, variable = "b_|sd_", regex = TRUE)
 
-# Calculate f-statistics
-fs <- mcmc %>%
+# Create summary table
+mcmc <- as_draws_df(m_full, variable = "b_|sd_|sigma", regex = TRUE)
+table_saguaro <- mcmc %>%
+  summarize_draws(mean, 
+                  ~quantile2(.x, probs = 0.025),
+                  ~quantile2(.x, probs = 0.975),
+                  rhat, 
+                  ess_bulk,
+                  "ProbPos" = prob_gt0,
+                  "ProbNeg" = prob_lt0) %>%
+  mutate(f = pmax(ProbPos, ProbNeg)) %>%
   data.frame() %>%
-  select(contains("b_")) %>%
-  select(-contains("b_I"))
-fs <- data.frame(var = colnames(fs),
-                 mn = apply(fs, 2, mean),
-                 f_prelim = apply(fs, 2, function(x) sum(x > 0)/length(x)),
-                 row.names = NULL) %>%
-  mutate(f = ifelse(mn > 0, f_prelim, 1 - f_prelim))
-fs
+  select(-contains("Prob"))
+
+# Write to file
+write.csv(table_saguaro,
+          "output/saguaro-table.csv",
+          row.names = FALSE)
 
 # Make predictions, create figures --------------------------------------------#
 
@@ -446,15 +456,15 @@ pred_flowers <- preds %>%
                                             "11 to 100",
                                             "More than 100")))
 
-# 6-panel prediction figure
-text_size <- 8
+# 6-panel prediction figure (2 columns: winter temp x elevation)
+text_size <- 7
 plot6_flowers <- ggplot(pred_flowers, aes(x = ppt_9_p, y = .epred)) +
   geom_line(aes(color = abund3), linewidth = 1) +
   scale_color_manual(values = c("#d8b365", "#80cdc1", "#018571")) +
   facet_grid(loc ~ winter) +
   labs(x = "Cumulative 9-month precipitation, % of normal", 
        y = "Probability", 
-       color = "Flowers") +
+       color = "") +
   theme_bw() +
   theme(legend.position = "bottom",
         legend.margin   = margin(t = -8),
@@ -466,7 +476,43 @@ plot6_flowers <- ggplot(pred_flowers, aes(x = ppt_9_p, y = .epred)) +
         strip.text = element_text(size = text_size))
 plot6_flowers
 
-# Map
+ggsave("output/saguaro-predictions-tall.png",
+       plot6_flowers,
+       width = 3.25, height = 4.5, units = "in", dpi = 600)
+
+# 6-panel prediction figure (3 columns: elevation x winter temp)
+pred_flowers <- pred_flowers %>%
+  mutate(loc = factor(loc, 
+                      levels = c("Low elevation", 
+                                 "Mean elevation", 
+                                 "High elevation"))) %>%
+  mutate(winter = factor(winter, 
+                         levels = c("Warm winter", "Average winter")))
+
+text_size <- 7
+plot6_flowers_wide <- ggplot(pred_flowers, aes(x = ppt_9_p, y = .epred)) +
+  geom_line(aes(color = abund3), linewidth = 1) +
+  scale_color_manual(values = c("#d8b365", "#80cdc1", "#018571")) +
+  facet_grid(winter ~ loc) +
+  labs(x = "Cumulative 9-month precipitation, % of normal", 
+       y = "Probability", 
+       color = "") +
+  theme_bw() +
+  theme(legend.position = "bottom",
+        legend.margin   = margin(t = -8),
+        panel.grid = element_blank(),
+        axis.title = element_text(size = text_size),
+        axis.text = element_text(size = text_size),
+        legend.text = element_text(size = text_size),
+        legend.title = element_text(size = text_size), 
+        strip.text = element_text(size = text_size))
+plot6_flowers_wide
+
+ggsave("output/saguaro-predictions-wide.png",
+       plot6_flowers_wide,
+       width = 6.5, height = 3, units = "in", dpi = 600)
+
+# Map -------------------------------------------------------------------------#
 states <- vect("states/cb_2017_us_state_500k.shp")
 states <- terra::project(states, "epsg:4326") 
 sitesv <- vect(sites, geom = c("lon", "lat"), crs = "epsg:4326")
@@ -518,7 +564,7 @@ map <- ggplot(data = sonoran_desert) +
   labs(size = "No. plant-years", 
        color = "Elev (m)") +
   theme_bw() +
-  theme(legend.position = "bottom",
+  theme(legend.position = "right",
         legend.box = "horizontal",
         legend.text = element_text(size = text_size),
         legend.title = element_text(size = text_size),
@@ -526,18 +572,13 @@ map <- ggplot(data = sonoran_desert) +
         legend.direction = "vertical",
         axis.text = element_text(size = text_size),
         panel.grid = element_blank())
+map
 
 gg_inset_map2 <- ggdraw() +
   draw_plot(map) +
-  draw_plot(inset, x = 0.53, y = 0.77, width = 0.4, height = 0.23)
+  draw_plot(inset, x = 0.22, y = 0.70, width = 0.6, height = 0.28)
+gg_inset_map2
 
-# Combine map, prediction figures
-combined <- plot_grid(gg_inset_map2, plot6_flowers, 
-                      labels = c("a)", "b)"),
-                      label_size = 12,
-                      nrow = 1, 
-                      scale = 0.98,
-                      rel_widths = c(4, 5))
-ggsave("output/map-saguaro-predictions-6panel.png",
-       combined,
-       width = 6.5, height = 4.5, units = "in", dpi = 600)
+ggsave("output/saguaro-map.png",
+       gg_inset_map2,
+       width = 6.5, height = 4, units = "in", dpi = 600)
