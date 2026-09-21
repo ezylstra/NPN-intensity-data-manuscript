@@ -509,10 +509,9 @@ fs_full <- mcmc_full %>%
   select(-contains("Prob"))
 fs_full 
 
-# Reduced model (keep variables with f > 0.9), add all 2-way interactions
-m_int <- brm(maxcount_log ~ lat_z + winter_ppt_z + winter_tmin_z + 
-               lat_z:winter_ppt_z + lat_z:winter_tmin_z + 
-               winter_ppt_z:winter_tmin_z + (1|fyr) + (1|site),
+# Reduced model (keep variables with f > 0.9), add all interactions
+m_int <- brm(maxcount_log ~ lat_z * winter_ppt_z * winter_tmin_z + 
+               (1|fyr) + (1|site),
              data = ofmax,
              seed = 1234)
 
@@ -528,7 +527,7 @@ fs_int <- mcmc_int %>%
   data.frame() %>%
   select(-contains("Prob"))
 fs_int
-# Latitude*winter precip is the only interaction with f > 0.9
+# Latitude * winter precip is the only interaction with f > 0.9
 
 # Final model
 m_int <- brm(maxcount_log ~ lat_z + winter_ppt_z + winter_tmin_z + 
@@ -804,7 +803,7 @@ plot_doy
 
 # Combine plots ---------------------------------------------------------------#
 
-# Combine map, prediction figures
+# Combine prediction figures
 combined <- plot_grid(plot_maxc, plot_doy, 
                       labels = c("a)", "b)"),
                       label_size = 11,
