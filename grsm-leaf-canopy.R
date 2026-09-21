@@ -1,5 +1,5 @@
 # Analyses of NPN intensity data
-# Canopy fullness, trees in Great Smokey Mtns National Park (GRSM)
+# Canopy fullness, trees in Great Smoky Mtns National Park (GRSM)
 
 library(rnpn)
 library(dplyr)
@@ -11,6 +11,8 @@ library(ggplot2)
 library(ordbetareg)
 library(tidybayes)
 library(terra)
+library(tidyterra)
+library(cowplot)
 
 # Download data via rnpn package, basic formatting (if not done already) ------#
 
@@ -127,10 +129,10 @@ for (i in 2:nrow(df)) {
 }
 
 # Want to remove plant-year combinations if:
-# no observations in phase
-# no observations with intensity values
-# <5 observations
-# maximum interval between consecutive observations > 21 days
+  # no observations in phase
+  # no observations with intensity values
+  # <5 observations
+  # maximum interval between consecutive observations > 21 days
 
 # Summarize amount and quality of information for each plant, year
 pl_yr <- df %>%
@@ -257,7 +259,7 @@ grsm_sites <- dff %>%
 # Daily data
 prism_files <- list.files("weather-data/grsm",
                           full.names = TRUE,
-                          pattern = "stable|provisional")
+                          pattern = "stable")
 for (i in 1:length(prism_files)) {
   prism1 <- read.csv(prism_files[i],
                      header = FALSE,
@@ -484,3 +486,88 @@ plot_gdd_spp
 # ggsave("output/grsm-canopy-gdd.png",
 #        plot_gdd_spp,
 #        width = 6.5, height = 3, units = "in", dpi = 600)
+
+# Create a map ----------------------------------------------------------------#
+
+sitesspp <- dff_no20 %>% 
+  group_by(site, lat, lon, common_name) %>%
+  summarize(n_trees = n_distinct(id),
+            n_yrs = n_distinct(yr),
+            n_treeyrs = n_distinct(paste0(id, "_", yr)),
+            .groups = "drop") %>%
+  data.frame()
+sitessppv <- vect(sitesspp, geom = c("lon", "lat"), "epsg:4326")
+
+# Get states shapefile
+states <- vect("states/cb_2017_us_state_500k.shp")
+states <- terra::project(states, "epsg:4326") 
+states <- terra::subset(states, states$STUSPS %in% c("TN", "NC"))
+
+# Park boundary
+grsm_boundary <- vect("np_boundary/grsm-boundary.shp")
+grsm_boundary <- terra::project(grsm_boundary, "epsg:4326")
+
+text_size <- 8
+
+# Note: jittering points since there's lots of overlap
+set.seed(1234)
+sitessppj <- sitesspp %>%
+  mutate(lat = lat + rnorm(nrow(sitesspp), sd = 0.008),
+         lon = lon + rnorm(nrow(sitesspp), sd = 0.008)) %>%
+  vect(geom = c("lon", "lat"), "epsg:4326")
+
+map <- ggplot() +
+  geom_spatvector(data = states, fill = "white") +
+  geom_spatvector(data = grsm_boundary, fill = NA, color = "steelblue4") +
+  geom_spatvector(data = sitessppj, 
+                  aes(size = n_treeyrs, color = common_name),
+                  alpha = 0.6) +
+  annotate("text", x = -83.6, y = 35.83, label = "Tennessee", size = 3) +
+  annotate("text", x = -83.2, y = 35.45, label = "North Carolina", size = 3) +
+  scale_color_manual(values = color) +
+  scale_size_continuous(range = c(1, 7)) +
+  scale_x_continuous(breaks = c(-84, -83.5, -83),
+                     limits = c(-84.0, -83.0),
+                     labels = c("-84.0°", "-83.5°", "-83.0°")) +
+  scale_y_continuous(breaks = c(35.4, 35.6, 35.8),
+                     limits = c(35.4, 35.85),
+                     labels = c("35.4°", "35.6°", "35.8°")) +
+  labs(size = "No. tree-years", 
+       color = "Species") +
+  theme_bw() +
+  theme(legend.text = element_text(size = text_size),
+        legend.title = element_text(size = text_size),
+        axis.text = element_text(size = text_size),
+        legend.key.size = unit(0.4, "cm"),
+        legend.spacing.y = unit(0.1, "cm"))
+map
+
+# Inset
+countries <- rnaturalearth::ne_countries()
+countries <- vect(countries)
+countries <- terra::subset(countries, 
+                           countries$admin %in% c("United States of America",
+                                                  "Mexico",
+                                                  "Canada"))
+inset <- ggplot(data = countries) +
+  geom_spatvector(fill = "white") +
+  lims(x = c(-125, -69), y = c(17, 50)) +
+  annotate("rect", ymin = 34.5, ymax = 36.5, xmin = -84.5, xmax = -82.5,
+           fill = "black", color = "black") + 
+  theme_bw() +
+  theme(axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        panel.background = element_rect(fill = "gray98"),
+        panel.grid = element_blank(),
+        plot.margin = margin(t = 0, r = 0, b = 0, l = 0))
+
+gg_inset_map2 <- ggdraw() +
+  draw_plot(map) +
+  draw_plot(inset, x = -0.04, y = 0.655, width = 0.36, height = 0.17)
+
+# ggsave("output/grsm-map.png",
+#        gg_inset_map2,
+#        width = 6.5, height = 4, units = "in", dpi = 600)
+
+
+
