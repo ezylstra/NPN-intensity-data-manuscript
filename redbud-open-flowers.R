@@ -714,8 +714,8 @@ table_peak <- mcmc_peak_int %>%
 
 # Create marginal effect plot for max open flower count -----------------------#
 
-# TODO: Determine best color palette (keeping in mind color palettes used in
-# other figures)
+cols <- palette.colors(palette = "Okabe-Ito")[c(7, 9, 6)]
+# dark orange, gray, blue
 
 # Max count at different winter precip levels and latitudes, for mean winter temp (0)
 lat_pred <- c(min(ofmax$lat), mean(ofmax$lat), max(ofmax$lat))
@@ -743,10 +743,10 @@ pred_maxc <- preds_maxc %>%
 
 text_size <- 8
 plot_maxc <- ggplot(pred_maxc, aes(x = winter_ppt_p, y = .epred)) +
-  geom_line(aes(color = loc, linetype = loc), linewidth = 0.5) +
+  geom_line(aes(color = loc, linetype = loc), linewidth = 0.3) +
   geom_ribbon(aes(ymin = .lower, ymax = .upper, fill = loc), alpha = 0.3) +
-  scale_color_manual(values = c("#d8b365", "#80cdc1", "#018571")) +
-  scale_fill_manual(values = c("#d8b365", "#80cdc1", "#018571")) +
+  scale_color_manual(values = cols) +
+  scale_fill_manual(values = cols) +
   labs(x = "Winter precipitation, % of normal", 
        y = "Log(No. open flowers)", 
        color = "Latitude", fill = "Latitude", linetype = "Latitude") +
@@ -789,10 +789,10 @@ pred_doy <- preds_doy %>%
 
 text_size <- 8
 plot_doy <- ggplot(pred_doy, aes(x = agdd_p, y = .epred)) +
-  geom_line(aes(color = loc, linetype = loc), linewidth = 0.5) +
+  geom_line(aes(color = loc, linetype = loc), linewidth = 0.3) +
   geom_ribbon(aes(ymin = .lower, ymax = .upper, fill = loc), alpha = 0.3) +
-  scale_color_manual(values = c("#d8b365", "#80cdc1", "#018571")) +
-  scale_fill_manual(values = c("#d8b365", "#80cdc1", "#018571")) +
+  scale_color_manual(values = cols) +
+  scale_fill_manual(values = cols) +
   labs(x = "90-day GDD, difference from normal (°C)", 
        y = "Day of year") +
   theme_bw() +
