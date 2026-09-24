@@ -345,7 +345,7 @@ dff_no20 %>%
 # Species as a random effect
   # m_no20_gdd <- ordbetareg(
   #   prop ~ agdd_z + (1 + agdd_z|spp) + (1|id),
-  #   data = dff_no20, 
+  #   data = dff_no20,
   #   control = list(adapt_delta = 0.99),
   #   iter = 4000, cores = 4, chains = 4,
   #   backend = "cmdstanr")
@@ -364,12 +364,12 @@ summary(m_no20_doy_REint)
 # Compare models
 # (lower looic is better; elpd_diff = 0 for best model)
 loo_doy <- loo(m_no20_doy, cores = 4)
-loo_doy # looic = 12224.1
+loo_doy # looic = 12222.1
 loo_doy_int <- loo(m_no20_doy_REint, cores = 4)
-loo_doy_int # looic = 11643.4
+loo_doy_int # looic = 11639.2
 loo_compare(loo_doy, loo_doy_int)
 # For DOY models, more complex RE structure is better (species effect varies by 
-# year; elpd_diff for non-interaction model = -290.3). 
+# year; elpd_diff for non-interaction model = -291.4). 
 
 # Visualize results for best DOY model ----------------------------------------#
 
@@ -568,6 +568,3 @@ gg_inset_map2 <- ggdraw() +
 # ggsave("output/grsm-map.png",
 #        gg_inset_map2,
 #        width = 6.5, height = 4, units = "in", dpi = 600)
-
-
-
