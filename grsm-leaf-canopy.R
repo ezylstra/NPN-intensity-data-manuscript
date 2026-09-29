@@ -8,7 +8,9 @@ library(lubridate)
 library(tidyr)
 library(zoo)
 library(ggplot2)
+library(brms)
 library(ordbetareg)
+library(posterior)
 library(tidybayes)
 library(terra)
 library(tidyterra)
@@ -568,3 +570,47 @@ gg_inset_map2 <- ggdraw() +
 # ggsave("output/grsm-map.png",
 #        gg_inset_map2,
 #        width = 6.5, height = 4, units = "in", dpi = 600)
+
+# Save tables with parameter estimates from each model ------------------------#
+
+# Create a couple simple functions for calculating f-statistics
+prob_gt0 <- function(x) mean(x > 0)
+prob_lt0 <- function(x) mean(x < 0)
+
+# Create summary table for DOY model
+mcmc_doy <- as_draws_df(m_no20_doy_REint, 
+                        variable = "b_|sd_|cor_|phi|cut", 
+                        regex = TRUE)
+table_doy <- mcmc_doy %>%
+  summarize_draws(mean, 
+                  ~quantile2(.x, probs = 0.025),
+                  ~quantile2(.x, probs = 0.975),
+                  rhat, 
+                  ess_bulk,
+                  "ProbPos" = prob_gt0,
+                  "ProbNeg" = prob_lt0) %>%
+  mutate(f = pmax(ProbPos, ProbNeg)) %>%
+  data.frame() %>%
+  select(-contains("Prob"))
+
+# Create summary table for GDD model
+mcmc_gdd <- as_draws_df(m_no20_gdd, 
+                        variable = "b_|sd_|cor_|phi|cut", 
+                        regex = TRUE)
+table_gdd <- mcmc_gdd %>%
+  summarize_draws(mean, 
+                  ~quantile2(.x, probs = 0.025),
+                  ~quantile2(.x, probs = 0.975),
+                  rhat, 
+                  ess_bulk,
+                  "ProbPos" = prob_gt0,
+                  "ProbNeg" = prob_lt0) %>%
+  mutate(f = pmax(ProbPos, ProbNeg)) %>%
+  data.frame() %>%
+  select(-contains("Prob"))
+
+# Write to file
+# write.csv(table_doy, "output/grsm-canopy-doy-table.csv", row.names = FALSE)
+# write.csv(table_gdd, "output/grsm-canopy-gdd-table.csv", row.names = FALSE)
+
+
