@@ -297,6 +297,10 @@ of_plantyrs <- flowers %>%
          earliest_obs = ifelse(min_doy <= 100, 1, 0),
          startend0 = ifelse(start0 == 1 & end0 == 1, 1, 0)) %>%
   mutate(remove = ifelse(min_counts + earliest_obs + startend0 == 3, 0, 1))
+# Filters stated in another way: at least 4 observations between DOY 1-180
+# with the first observation occurring on or before day 100. First and last
+# observation must have 0 open flowers and at least two counts inbetween must be 
+# greater than 0.
 
 count(of_plantyrs, remove)
 # With these filters, left with 530 plant-years (30.8% of 1719 plant years)
@@ -733,7 +737,7 @@ preds_maxc <- m_int %>%
   epred_rvars(newdata = newdat, re_formula = NA) %>%
   mean_qi(.epred)
 pred_maxc <- preds_maxc %>%
-  mutate(winter_ppt_p = winter_ppt_z * sd(ofmax$winter_ppt_perc) + mean(ofpeak$winter_ppt_perc)) %>%
+  mutate(winter_ppt_p = winter_ppt_z * sd(ofmax$winter_ppt_perc) + mean(ofmax$winter_ppt_perc)) %>%
   mutate(loc = case_when(
     lat_z == lat_pred_z[1] ~ paste0(sprintf("%.1f", round(lat_pred[1], 1)), "°"),
     lat_z == lat_pred_z[2] ~ paste0(sprintf("%.1f", round(lat_pred[2], 1)), "°"),
