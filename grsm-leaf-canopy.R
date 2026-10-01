@@ -450,6 +450,9 @@ plot_doy_yr_spp
 
 # Visualize results for GDD model ---------------------------------------------#
 
+# Species-specific slopes, intercepts with 95% CIs
+coef(m_no20_gdd)$spp
+
 # Predictions for species across years (ignore year, year:spp, and ind REs)
 newdat <- expand_grid(agdd_z = seq(min(dff_no20$agdd_z), 
                                    max(dff_no20$agdd_z), 
