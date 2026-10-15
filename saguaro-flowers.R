@@ -404,9 +404,9 @@ table_saguaro <- mcmc %>%
   select(-contains("Prob"))
 
 # Write to file
-write.csv(table_saguaro,
-          "output/saguaro-table.csv",
-          row.names = FALSE)
+# write.csv(table_saguaro,
+#           "output/saguaro-table.csv",
+#           row.names = FALSE)
 
 # Make predictions, create figures --------------------------------------------#
 
@@ -476,41 +476,9 @@ plot6_flowers <- ggplot(pred_flowers, aes(x = ppt_9_p, y = .epred)) +
         strip.text = element_text(size = text_size))
 plot6_flowers
 
-ggsave("output/saguaro-predictions-tall.png",
-       plot6_flowers,
-       width = 3.25, height = 4.5, units = "in", dpi = 600)
-
-# 6-panel prediction figure (3 columns: elevation x winter temp)
-pred_flowers <- pred_flowers %>%
-  mutate(loc = factor(loc, 
-                      levels = c("Low elevation", 
-                                 "Mean elevation", 
-                                 "High elevation"))) %>%
-  mutate(winter = factor(winter, 
-                         levels = c("Warm winter", "Average winter")))
-
-text_size <- 7
-plot6_flowers_wide <- ggplot(pred_flowers, aes(x = ppt_9_p, y = .epred)) +
-  geom_line(aes(color = abund3), linewidth = 1) +
-  scale_color_manual(values = c("#d8b365", "#80cdc1", "#018571")) +
-  facet_grid(winter ~ loc) +
-  labs(x = "Cumulative 9-month precipitation, % of normal", 
-       y = "Probability", 
-       color = "") +
-  theme_bw() +
-  theme(legend.position = "bottom",
-        legend.margin   = margin(t = -8),
-        panel.grid = element_blank(),
-        axis.title = element_text(size = text_size),
-        axis.text = element_text(size = text_size),
-        legend.text = element_text(size = text_size),
-        legend.title = element_text(size = text_size), 
-        strip.text = element_text(size = text_size))
-plot6_flowers_wide
-
-ggsave("output/saguaro-predictions-wide.png",
-       plot6_flowers_wide,
-       width = 6.5, height = 3, units = "in", dpi = 600)
+# ggsave("output/saguaro-predictions-tall.png",
+#        plot6_flowers,
+#        width = 3.25, height = 4.5, units = "in", dpi = 600)
 
 # Map -------------------------------------------------------------------------#
 states <- vect("states/cb_2017_us_state_500k.shp")
@@ -579,6 +547,6 @@ gg_inset_map2 <- ggdraw() +
   draw_plot(inset, x = 0.22, y = 0.70, width = 0.6, height = 0.28)
 gg_inset_map2
 
-ggsave("output/saguaro-map.png",
-       gg_inset_map2,
-       width = 6.5, height = 4, units = "in", dpi = 600)
+# ggsave("output/saguaro-map.png",
+#        gg_inset_map2,
+#        width = 6.5, height = 4, units = "in", dpi = 600)
