@@ -18,16 +18,17 @@ Here, we provide the code needed to download USA-NPN data and run analyses for e
 3. [redbud-open-flowers.R](redbud-open-flowers.R): R code to download status-intensity data for eastern redbud trees in the eastern U.S., 2016-2025 and use linear mixed-effect models to explore variation in the magnitude and timing of peak flowering (open flower abundance). 
 
 ## Phenology and Weather Data
-Phenological data were downloaded from USA-NPN via the rnpn package on 17 September 2026. R code used to download the data can be found in the scripts listed above. Original data files were slightly modified (missing state codes were filled in; unnecessary columns removed) and then saved as csv files in the [npn-data](npn-data) folder. Information about fields in the USA-NPN status-intensity data products can be found at [https://www.usanpn.org/data/observational](https://www.usanpn.org/data/observational). 
+Phenological data were downloaded from USA-NPN via the <i>rnpn</i> package on 17 September 2026. R code used to download the data can be found in the scripts listed above. Original data files were slightly modified (missing state codes were filled in; unnecessary columns removed) and then saved as csv files in the [npn-data](npn-data) folder. Information about fields in the USA-NPN status-intensity data products can be found at [https://www.usanpn.org/data/observational](https://www.usanpn.org/data/observational). 
 
-Weather data were obtained from [PRISM](https://www.prism.oregonstate.edu) at 800-m spatial resolution via their web portal on 17 September 2026. CSV files with geographic coordinates for sites included in each case study, along with folders that contain the original PRISM datafiles, can be found in the [weather-data](weather-data) folder. 
+Weather data were obtained from [PRISM](https://www.prism.oregonstate.edu) at 800-m spatial resolution via their web portal on 17 September 2026. csv files with geographic coordinates for sites included in each case study, along with folders that contain the original PRISM datafiles, can be found in the [weather-data](weather-data) folder. 
 
 ## Other Data
 Several shapefiles were needed to fill in missing state codes in the phenology data or create figures in the manuscript. 
+
 - [states](states): U.S. state boundaries
-- [sonoran-desert](sonoran-desert): Geographic boundary of the Sonoran Desert region in the U.S. and Mexico.
+- [sonoran-desert](sonoran-desert): Geographic boundary of the Sonoran Desert region in the U.S. and Mexico
 - [np-boundary](np_boundary): Political boundary of Great Smoky Mountains National Park
 
 ## Output
-- [output](output): contains output from each of the case studies: figures (png files) and parameter estimates (csv files).
-- [grsm-models](grsm-models): contains RData files, each containing a brmsfit object (posterior draws, model formula, Stan code, and relevant data from a model run using the ordbetareg package).
+- [output](output): folder that contains output from each of the case studies: figures (png files) and parameter estimates (csv files).
+- [grsm-models](grsm-models): folder that contains RData files, each containing a brmsfit object (posterior draws, model formula, Stan code, and relevant data from a model run using the <i>ordbetareg</i> package).
